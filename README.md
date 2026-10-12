@@ -47,3 +47,31 @@ Quantize (defaults: absmax, min-gemm 256)
 --warn-thresh F — warn on any quantized layer over F% relerr (default 2.0; 4.0 for W6A8, 10.0 for W4A8)
 --verify-report PATH — dump the full per-layer (relerr, cos, gs) table
 ```
+
+### Portable Windows GUI
+
+`convrot_gui.py` wraps `quant_int8_convrot.py` in a simple window: pick the source model, pick the
+format (INT8 / W6A8 / W4A8), optionally **Dry run** to see the plan, then **Convert**. The log shows
+the same output as the CLI, and **Cancel** stops the conversion and removes the partial output file.
+
+Prebuilt portable builds (no Python or installation needed) are on the
+[Releases](../../releases) page:
+
+- `ConvRotQuantizer-win64-cuda.7z.001`, `.002`, ... — NVIDIA GPU build (~3 GB, falls back to CPU if
+  no GPU is found). Download all parts and open the `.001` with [7-Zip](https://www.7-zip.org/).
+- `ConvRotQuantizer-win64-cpu.zip` — CPU-only build, much smaller but slower.
+
+Extract anywhere (e.g. a USB stick) and run `ConvRotQuantizer\ConvRotQuantizer.exe`.
+
+The builds come from `.github/workflows/build-windows-gui.yml`: push a `v*` tag, or run the
+*Build Windows GUI* workflow from the Actions tab, to publish a new release. To build locally on
+Windows instead:
+
+```sh
+pip install torch --index-url https://download.pytorch.org/whl/cu128
+pip install comfy-kitchen safetensors pyinstaller
+pyinstaller --noconfirm convrot_gui.spec
+```
+
+The GUI also runs straight from source with `python convrot_gui.py`.
+The CLI gained `--device` (`auto` = CUDA if available, else CPU; or `cuda`, `cuda:1`, `cpu`).

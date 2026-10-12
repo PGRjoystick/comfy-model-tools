@@ -1,0 +1,98 @@
+name: Build Windows GUI
+
+# Builds the portable ConvRot Quantizer (convrot_gui.py) for Windows in two flavours:
+#   cuda - NVIDIA GPU build (falls back to CPU when no GPU is present), ~3 GB
+#   cpu  - CPU-only build, much smaller download, slower conversion
+# Every build runs a headless self-test of the frozen exe. Pushing a tag (v*) or running the
+# workflow manually with "publish" checked uploads the archives to a GitHub Release.
+on:
+  push:
+    tags: ["v*"]
+    branches: ["**"]         # branch pushes only build + self-test when the GUI files change
+    paths:
+      - convrot_gui.py
+      - convrot_gui.spec
+      - quant_int8_convrot.py
+      - .github/workflows/build-windows-gui.yml
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: "Upload the archives to a GitHub Release"
+        type: boolean
+        default: true
+      tag:
+        description: "Release tag (default: gui-<run number>)"
+        type: string
+        default: ""
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - flavour: cuda
+            torch_index: https://download.pytorch.org/whl/cu128
+          - flavour: cpu
+            torch_index: https://download.pytorch.org/whl/cpu
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install torch --index-url ${{ matrix.torch_index }}
+          python -m pip install comfy-kitchen safetensors pyinstaller
+          python -c "import torch, comfy_kitchen; print('torch', torch.__version__)"
+
+      - name: Build exe
+        run: pyinstaller --noconfirm --clean convrot_gui.spec
+
+      - name: Self-test frozen exe
+        shell: pwsh
+        run: |
+          $p = Start-Process -FilePath dist\ConvRotQuantizer\ConvRotQuantizer.exe `
+                -ArgumentList "--selftest", "$PWD\selftest.log" -Wait -PassThru
+          Get-Content selftest.log
+          if ($p.ExitCode -ne 0) { throw "self-test failed (exit $($p.ExitCode))" }
+
+      - name: Package
+        shell: pwsh
+        run: |
+          Copy-Item README.md, LICENSE dist\ConvRotQuantizer\
+          New-Item -ItemType Directory release | Out-Null
+          $name = "ConvRotQuantizer-win64-${{ matrix.flavour }}"
+          Push-Location dist
+          if ("${{ matrix.flavour }}" -eq "cpu") {
+            7z a -tzip -mx=5 "..\release\$name.zip" ConvRotQuantizer | Out-Null
+          } else {
+            # GitHub release assets are capped at 2 GB -> multi-volume 7z (open the .001 with 7-Zip)
+            7z a -t7z -mx=5 -v1900m "..\release\$name.7z" ConvRotQuantizer | Out-Null
+          }
+          Pop-Location
+          Get-ChildItem release | Format-Table Name, Length
+
+      - name: Upload to release
+        if: startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && inputs.publish)
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = if ("${{ github.ref_type }}" -eq "tag") { "${{ github.ref_name }}" }
+                 elseif ("${{ inputs.tag }}") { "${{ inputs.tag }}" } else { "gui-${{ github.run_number }}" }
+          # both matrix jobs race to create the release; whoever loses just uploads
+          gh release view $tag 2>$null
+          if ($LASTEXITCODE -ne 0) {
+            gh release create $tag --target "${{ github.sha }}" --title "ConvRot Quantizer $tag" `
+              --notes "Portable Windows build of the ConvRot quantizer GUI. Download the cuda build for NVIDIA GPUs (extract ConvRotQuantizer-win64-cuda.7z.001 with 7-Zip) or the smaller cpu build, then run ConvRotQuantizer.exe."
+            if ($LASTEXITCODE -ne 0) { Start-Sleep 10; gh release view $tag; if ($LASTEXITCODE -ne 0) { exit 1 } }
+          }
+          gh release upload $tag (Get-ChildItem release).FullName --clobber

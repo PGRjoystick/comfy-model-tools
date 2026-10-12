@@ -30,6 +30,11 @@ except ImportError:
 VALID_GS  = (256, 64, 16)                       # convrot Hadamard sizes; power-of-4, prefer largest
 CLIP_GRID = torch.linspace(0.55, 1.0, 80)
 FP8 = (getattr(torch, "float8_e4m3fn", None), getattr(torch, "float8_e5m2", None))
+DEVICE = "cuda"                                 # set by --device in main(); "cpu" works too, just slower
+
+def empty_cache():
+    if torch.cuda.is_available():
+        empty_cache()
 
 def best_gs(k):
     return next((g for g in VALID_GS if k % g == 0), None)
@@ -130,7 +135,8 @@ def classify(key, shape):
 # Quantization (fp32 upcast + block-Hadamard rotation + MSE-optimal per-channel clip)
 # ---------------------------------------------------------------------------
 @torch.no_grad()
-def quantize_convrot(w, gs, mseclip=True, device="cuda"):
+def quantize_convrot(w, gs, mseclip=True, device=None):
+    device = device or DEVICE
     wf = w.to(device, torch.float32)
     h  = _build_hadamard(gs, device=wf.device, dtype=torch.float32)
     wr = _rotate_weight(wf, h, gs)
@@ -153,8 +159,9 @@ def quantize_convrot(w, gs, mseclip=True, device="cuda"):
     return best_q.to(torch.int8), best_scale.to(torch.float32)
 
 @torch.no_grad()
-def recon_metrics(qd, scale, w_ref, gs, device="cuda"):
+def recon_metrics(qd, scale, w_ref, gs, device=None):
     """Reconstruct (dequant + un-rotate) and return (cosine, relative_error_%)."""
+    device = device or DEVICE
     deq = qd.to(device).float() * scale.to(device)
     h = _build_hadamard(gs, device=device, dtype=torch.float32)
     deq = _rotate_weight(deq, h, gs)
@@ -168,11 +175,12 @@ def cq_tensor(gs):
     return torch.tensor(list(json.dumps(cfg).encode("utf-8")), dtype=torch.uint8)
 
 @torch.no_grad()
-def quantize_w4a8(w, bits=4, group_size=None, device="cuda"):
+def quantize_w4a8(w, bits=4, group_size=None, device=None):
     """W4A8: ConvRot-rotated int4 weight with a Lloyd-Max codebook + fp8 group
     scales, or with bits=6 W6A8: uniform int6, no codebook, ~3x lower weight error for
     1.5x the bytes. Activations quantize to int8 at runtime. Needs K divisible by 256 and N>=64.
     Returns (out-tensor dict, comfy_quant cfg, relerr%)."""
+    device = device or DEVICE
     from comfy_kitchen.tensor import AsymW4A8Int8Layout, QuantizedTensor
     group_size = group_size or (32 if bits == 6 else 16)
     wf = w.to(device, torch.bfloat16)
@@ -189,11 +197,12 @@ def quantize_w4a8(w, bits=4, group_size=None, device="cuda"):
     return tensors, cfg, relerr
 
 @torch.no_grad()
-def quantize_embedding(w, gs, device="cuda", chunk=32768):
+def quantize_embedding(w, gs, device=None, chunk=32768):
     """Rotated per-row int8 for token-embedding tables. Rotation Gaussianizes each row, tightening
     its absmax (~half the error for free). The runtime un-rotates after the lookup, since a lookup
     has no GEMM to fold the inverse into. gs=None -> plain absmax per-row int8 (no rotation).
     Chunked over rows so a ~1B-element vocab table never lands fully on the GPU."""
+    device = device or DEVICE
     h = _build_hadamard(gs, device=device, dtype=torch.float32) if gs else None
     qs, ss = [], []
     for i in range(0, w.shape[0], chunk):
@@ -204,11 +213,12 @@ def quantize_embedding(w, gs, device="cuda", chunk=32768):
         qs.append(q.to(torch.int8).cpu())
         ss.append(scale.to(torch.float32).cpu())
         del wf, wr, q, scale
-        torch.cuda.empty_cache()
+        empty_cache()
     return torch.cat(qs), torch.cat(ss)
 
 # ---------------------------------------------------------------------------
-def main():
+def main(argv=None):
+    global DEVICE
     ap = argparse.ArgumentParser()
     ap.add_argument("src")
     ap.add_argument("dst", nargs="?", help="output .safetensors; if omitted, derived from SRC by "
@@ -239,7 +249,10 @@ def main():
                     help="warn on any quantized layer whose relerr%% exceeds this (default 2.0 for int8, "
                          "4.0 for W6A8, 10.0 for W4A8: their normal weight error is ~2.4%% / ~7%%)")
     ap.add_argument("--verify-report", default=None, help="write the full per-layer (relerr, cos, gs) table to this path")
-    args = ap.parse_args()
+    ap.add_argument("--device", default="auto",
+                    help="torch device for quantization: auto (cuda if available, else cpu), cuda, cuda:N, cpu")
+    args = ap.parse_args(argv)
+    DEVICE = ("cuda" if torch.cuda.is_available() else "cpu") if args.device == "auto" else args.device
     bits = 6 if args.w6a8 else 4
     args.w4a8 = args.w4a8 or args.w6a8       # one grouped-int path below, parametrized by bits
     if args.warn_thresh is None:
@@ -301,6 +314,7 @@ def main():
             by_pat[pat][2] = gs
             qparams += shape[0] * shape[1]
         print(f"SRC {args.src}")
+        print(f"device: {DEVICE}")
         print(f"compute/passthrough dtype: {target}")
         fmt_label = (f"W{bits}A8+convrot (int8 fallback for K%256!=0 or N<64)" if args.w4a8
                      else f"int8+convrot, {'MSE-clip' if args.mseclip else 'absmax'}")
@@ -351,17 +365,17 @@ def main():
                 qd, scale = quantize_embedding(w, egs)
                 # relerr, chunked with f64 accumulation (a single fp32 .norm() over a ~1B-element
                 # vocab table accumulates enough error to misreport by >0.1pp)
-                h_e = _build_hadamard(egs, device="cuda", dtype=torch.float32) if egs else None
+                h_e = _build_hadamard(egs, device=DEVICE, dtype=torch.float32) if egs else None
                 se = sw = 0.0
                 for i in range(0, w.shape[0], 32768):
-                    wf = w[i:i + 32768].to("cuda", torch.float32)
-                    dq = qd[i:i + 32768].to("cuda").float() * scale[i:i + 32768].to("cuda")
+                    wf = w[i:i + 32768].to(DEVICE, torch.float32)
+                    dq = qd[i:i + 32768].to(DEVICE).float() * scale[i:i + 32768].to(DEVICE)
                     if h_e is not None:
                         dq = _rotate_weight(dq, h_e, egs)   # un-rotate to compare against source
                     se += ((dq - wf) ** 2).sum().double().item()
                     sw += (wf ** 2).sum().double().item()
                     del wf, dq
-                torch.cuda.empty_cache()
+                empty_cache()
                 relerr = (se / sw) ** 0.5 * 100.0
                 rot = f"rotated gs{egs} + " if egs else ""
                 print(f"  embedding {base} {tuple(w.shape)} {rot}per-row int8 relerr={relerr:.3f}%", flush=True)
@@ -372,7 +386,7 @@ def main():
                 out[key] = qd
                 out[f"{base}.weight_scale"] = scale
                 out[f"{base}.comfy_quant"] = torch.tensor(list(json.dumps(ecfg).encode("utf-8")), dtype=torch.uint8)
-                torch.cuda.empty_cache()
+                empty_cache()
                 continue
             if base in quant_set and args.w4a8 and best_gs(w.shape[1]) == 256 and w.shape[0] >= 64:
                 tensors, cfg, relerr = quantize_w4a8(w, bits, args.group_size)
@@ -408,7 +422,7 @@ def main():
                     out[key] = w.to(target)
                 else:
                     out[key] = t
-            torch.cuda.empty_cache()
+            empty_cache()
         save_file(out, args.dst, metadata=dict(src_meta))
         print(f"DONE: quantized {nq} layers, {len(out)} tensors, {time.time()-t0:.1f}s -> {args.dst}")
 
