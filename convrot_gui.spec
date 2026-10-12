@@ -3,7 +3,7 @@
 #   pyinstaller --noconfirm convrot_gui.spec   ->  dist/ConvRotQuantizer/ConvRotQuantizer.exe
 from PyInstaller.utils.hooks import collect_all
 
-datas, binaries, hiddenimports = [], [], ["quant_int8_convrot"]
+datas, binaries, hiddenimports = [], [], ["quant_int8_convrot", "numpy"]  # safetensors save_file needs numpy
 for pkg in ("comfy_kitchen", "safetensors"):     # comfy_kitchen loads its backends dynamically
     d, b, h = collect_all(pkg)
     datas += d

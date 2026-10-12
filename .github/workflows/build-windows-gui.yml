@@ -40,9 +40,9 @@ jobs:
             torch_index: https://download.pytorch.org/whl/cpu
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
 
@@ -50,7 +50,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip install torch --index-url ${{ matrix.torch_index }}
-          python -m pip install comfy-kitchen safetensors pyinstaller
+          python -m pip install comfy-kitchen safetensors numpy pyinstaller
           python -c "import torch, comfy_kitchen; print('torch', torch.__version__)"
 
       - name: Build exe

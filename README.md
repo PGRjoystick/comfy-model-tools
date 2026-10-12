@@ -69,7 +69,7 @@ Windows instead:
 
 ```sh
 pip install torch --index-url https://download.pytorch.org/whl/cu128
-pip install comfy-kitchen safetensors pyinstaller
+pip install comfy-kitchen safetensors numpy pyinstaller
 pyinstaller --noconfirm convrot_gui.spec
 ```
 
