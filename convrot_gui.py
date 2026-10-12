@@ -89,16 +89,17 @@ class Job:
     def poll(self):
         """Return the output lines produced so far; sets exit_code once the run is over."""
         lines = []
+        alive = self.proc.is_alive()     # check first: a child that exits mid-drain is still drained
         try:
             while True:
-                kind, val = self.q.get_nowait()
+                kind, val = self.q.get(timeout=0.5) if not alive else self.q.get_nowait()
                 if kind == "line":
                     lines.append(val)
                 else:
                     self.exit_code = val
         except queue.Empty:
             pass
-        if self.exit_code is None and not self.proc.is_alive():
+        if self.exit_code is None and not alive:
             self.exit_code = self.proc.exitcode if self.proc.exitcode else 1
             lines.append(f"converter process died unexpectedly (exit code {self.proc.exitcode}) "
                          "- out of RAM?")
@@ -365,7 +366,6 @@ def run_gui():
 # headless self-test: tiny synthetic model through every format via the same child-process path
 # ---------------------------------------------------------------------------
 def selftest(log_path):
-    import tempfile
     out = open(log_path, "w", encoding="utf-8")
 
     def say(s):
@@ -373,7 +373,21 @@ def selftest(log_path):
         out.flush()
 
     ok = True
-    with tempfile.TemporaryDirectory() as d:
+    try:
+        ok = _selftest_runs(say)
+    except BaseException:                        # never let a windowed exe die with a modal dialog
+        say(traceback.format_exc())
+        ok = False
+    say("\nSELFTEST " + ("PASSED" if ok else "FAILED"))
+    out.close()
+    return 0 if ok else 1
+
+
+def _selftest_runs(say):
+    import tempfile
+    ok = True
+    # ignore_cleanup_errors: on Windows a still-mapped output file can't be deleted right away
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as d:
         src = os.path.join(d, "tiny_bf16.safetensors")
         say("creating synthetic model")
         import torch
@@ -397,10 +411,14 @@ def selftest(log_path):
         for label, extra, dst in runs:
             argv = [src] + ([dst] if dst else []) + extra + ["--device", "cpu"]
             say(f"\n=== {label}: {' '.join(argv)}")
-            job = Job(argv)
+            job, t0 = Job(argv), time.time()
             while job.exit_code is None:
                 for line in job.poll():
                     say(line)
+                if time.time() - t0 > 300:
+                    job.cancel()
+                    say("TIMEOUT: converter child did not finish in 300s")
+                    return False
                 time.sleep(0.05)
             for line in job.poll():
                 say(line)
@@ -411,9 +429,7 @@ def selftest(log_path):
                 good = "blocks.0.attn.qkv.comfy_quant" in keys and "embed_tokens.comfy_quant" in keys
             say(f"--- {label}: {'PASS' if good else 'FAIL'} (exit {job.exit_code})")
             ok &= good
-    say("\nSELFTEST " + ("PASSED" if ok else "FAILED"))
-    out.close()
-    return 0 if ok else 1
+    return ok
 
 
 if __name__ == "__main__":

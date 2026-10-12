@@ -60,8 +60,14 @@ jobs:
         shell: pwsh
         run: |
           $p = Start-Process -FilePath dist\ConvRotQuantizer\ConvRotQuantizer.exe `
-                -ArgumentList "--selftest", "$PWD\selftest.log" -Wait -PassThru
-          Get-Content selftest.log
+                -ArgumentList "--selftest", "$PWD\selftest.log" -PassThru
+          $null = $p.Handle          # keep the handle so ExitCode is readable after exit
+          $done = $p.WaitForExit(600000)
+          if (Test-Path selftest.log) { Get-Content selftest.log }
+          if (-not $done) {
+            Get-Process ConvRotQuantizer -ErrorAction SilentlyContinue | Stop-Process -Force
+            throw "self-test timed out"
+          }
           if ($p.ExitCode -ne 0) { throw "self-test failed (exit $($p.ExitCode))" }
 
       - name: Package
