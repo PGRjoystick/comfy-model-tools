@@ -57,9 +57,9 @@ the same output as the CLI, and **Cancel** stops the conversion and removes the 
 Prebuilt portable builds (no Python or installation needed) are on the
 [Releases](../../releases) page:
 
-- `ConvRotQuantizer-win64-cuda.7z.001`, `.002`, ... — NVIDIA GPU build (~3 GB, falls back to CPU if
-  no GPU is found). Download all parts and open the `.001` with [7-Zip](https://www.7-zip.org/).
-- `ConvRotQuantizer-win64-cpu.zip` — CPU-only build, much smaller but slower.
+- `ConvRotQuantizer-win64-cuda.7z` — NVIDIA GPU build (~1.8 GB download, several GB extracted; falls
+  back to CPU if no GPU is found). Open with [7-Zip](https://www.7-zip.org/) or Windows 11 Explorer.
+- `ConvRotQuantizer-win64-cpu.zip` — CPU-only build (~160 MB), works anywhere but converts much slower.
 
 Extract anywhere (e.g. a USB stick) and run `ConvRotQuantizer\ConvRotQuantizer.exe`.
 

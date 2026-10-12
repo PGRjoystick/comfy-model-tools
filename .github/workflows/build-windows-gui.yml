@@ -1,8 +1,8 @@
 name: Build Windows GUI
 
 # Builds the portable ConvRot Quantizer (convrot_gui.py) for Windows in two flavours:
-#   cuda - NVIDIA GPU build (falls back to CPU when no GPU is present), ~3 GB
-#   cpu  - CPU-only build, much smaller download, slower conversion
+#   cuda - NVIDIA GPU build (falls back to CPU when no GPU is present), ~1.8 GB .7z
+#   cpu  - CPU-only build, ~160 MB .zip, slower conversion
 # Every build runs a headless self-test of the frozen exe. Pushing a tag (v*) or running the
 # workflow manually with "publish" checked uploads the archives to a GitHub Release.
 on:
@@ -80,8 +80,12 @@ jobs:
           if ("${{ matrix.flavour }}" -eq "cpu") {
             7z a -tzip -mx=5 "..\release\$name.zip" ConvRotQuantizer | Out-Null
           } else {
-            # GitHub release assets are capped at 2 GB -> multi-volume 7z (open the .001 with 7-Zip)
-            7z a -t7z -mx=5 -v1900m "..\release\$name.7z" ConvRotQuantizer | Out-Null
+            7z a -t7z -mx=5 "..\release\$name.7z" ConvRotQuantizer | Out-Null
+            if ((Get-Item "..\release\$name.7z").Length -gt 1.95GB) {
+              # GitHub release assets are capped at 2 GB -> multi-volume 7z (open the .001 with 7-Zip)
+              Remove-Item "..\release\$name.7z"
+              7z a -t7z -mx=5 -v1900m "..\release\$name.7z" ConvRotQuantizer | Out-Null
+            }
           }
           Pop-Location
           Get-ChildItem release | Format-Table Name, Length
@@ -98,7 +102,7 @@ jobs:
           gh release view $tag 2>$null
           if ($LASTEXITCODE -ne 0) {
             gh release create $tag --target "${{ github.sha }}" --title "ConvRot Quantizer $tag" `
-              --notes "Portable Windows build of the ConvRot quantizer GUI. Download the cuda build for NVIDIA GPUs (extract ConvRotQuantizer-win64-cuda.7z.001 with 7-Zip) or the smaller cpu build, then run ConvRotQuantizer.exe."
+              --notes "Portable Windows build of the ConvRot quantizer GUI. Download the cuda build for NVIDIA GPUs (~1.8 GB .7z; open with 7-Zip or Windows 11 Explorer) or the smaller cpu build, then run ConvRotQuantizer.exe."
             if ($LASTEXITCODE -ne 0) { Start-Sleep 10; gh release view $tag; if ($LASTEXITCODE -ne 0) { exit 1 } }
           }
           gh release upload $tag (Get-ChildItem release).FullName --clobber
